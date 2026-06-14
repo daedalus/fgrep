@@ -109,6 +109,19 @@ int main(int argc, char **argv) {
     }
 
     opts.pattern = argv[optind++];
+
+    if (!opts.fixed_string && !opts.ignore_case) {
+        const char *p = opts.pattern;
+        bool is_literal = true;
+        for (size_t i = 0; p[i]; i++) {
+            if (p[i] == '\\') { is_literal = false; break; }
+            if (p[i] == '.' || p[i] == '*' || p[i] == '+' || p[i] == '?' ||
+                p[i] == '[' || p[i] == ']' || p[i] == '(' || p[i] == ')' ||
+                p[i] == '{' || p[i] == '}' || p[i] == '^' || p[i] == '$' ||
+                p[i] == '|') { is_literal = false; break; }
+        }
+        opts.fixed_string = is_literal;
+    }
     opts.fixed_string = opts.fixed_string || !opts.pattern[0];
 
     fgrep_pattern_t pattern;
