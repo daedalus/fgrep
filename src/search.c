@@ -1,6 +1,6 @@
 #include "search.h"
 #include "simd.h"
-#include <emmintrin.h>
+#include <immintrin.h>
 #include <string.h>
 #include <stdlib.h>
 #include <pthread.h>
@@ -8,19 +8,6 @@
 #include <unistd.h>
 
 #define OUTPUT_BUF_SIZE (1 << 16)
-
-static inline void *fgrep_memchr(const void *s, int c, size_t n) {
-    const unsigned char *p = s;
-    __m128i needle = _mm_set1_epi8((char)c);
-    size_t i = 0;
-    for (; i + 16 <= n; i += 16) {
-        __m128i chunk = _mm_loadu_si128((const __m128i *)(p + i));
-        int mask = _mm_movemask_epi8(_mm_cmpeq_epi8(chunk, needle));
-        if (mask) return (void *)(p + i + __builtin_ctz(mask));
-    }
-    for (; i < n; i++) if (p[i] == (unsigned char)c) return (void *)(p + i);
-    return NULL;
-}
 
 static inline size_t find_line_start(const char *d, size_t p) {
     while (p > 0 && d[p - 1] != '\n') p--;
@@ -116,51 +103,45 @@ fgrep_status_t search_data(const char *data, size_t len, const char *path,
     size_t pos = 0, count = 0;
 
     if (opts->count_only || opts->files_with_matches || opts->files_without_match) {
+        /* Count-only fast path: AVX2 SIMD scan, batch all matches per chunk */
         if (nlen == 1) {
             unsigned char c = (unsigned char)needle[0];
-            __m128i ndl = _mm_set1_epi8((char)c);
-            while (pos + 1 <= len) {
-                size_t rem = len - pos;
-                const unsigned char *p = data + pos;
-                size_t i = 0;
-                void *f = NULL;
-                for (; i + 16 <= rem; i += 16) {
-                    __m128i chunk = _mm_loadu_si128((const __m128i *)(p + i));
-                    int mask = _mm_movemask_epi8(_mm_cmpeq_epi8(chunk, ndl));
-                    if (mask) { f = (void *)(p + i + __builtin_ctz(mask)); break; }
-                }
-                if (!f) for (; i < rem; i++) if (p[i] == c) { f = (void *)(p + i); break; }
-                if (!f) break;
-                pos = (size_t)((const char *)f - data);
-                count++;
-                pos++;
+            __m256i ndl = _mm256_set1_epi8((char)c);
+            size_t i = 0;
+            while (i + 32 <= len) {
+                __m256i chunk = _mm256_loadu_si256((const __m256i *)(data + i));
+                int mask = _mm256_movemask_epi8(_mm256_cmpeq_epi8(chunk, ndl));
+                count += __builtin_popcount((unsigned)mask);
+                i += 32;
             }
+            for (; i < len; i++) if (data[i] == c) count++;
         } else {
             unsigned char first = (unsigned char)needle[0];
             unsigned char last = (unsigned char)needle[nlen - 1];
-            __m128i ndl_f = _mm_set1_epi8((char)first);
-            __m128i ndl_l = _mm_set1_epi8((char)last);
-            while (pos + nlen <= len) {
-                size_t rem = len - pos - nlen + 1;
-                const unsigned char *p = data + pos;
-                size_t i = 0;
-                void *f = NULL;
-                for (; i + 16 <= rem; i += 16) {
-                    __m128i cf = _mm_loadu_si128((const __m128i *)(p + i));
-                    int mf = _mm_movemask_epi8(_mm_cmpeq_epi8(cf, ndl_f));
-                    __m128i cl = _mm_loadu_si128((const __m128i *)(p + i + nlen - 1));
-                    int ml = _mm_movemask_epi8(_mm_cmpeq_epi8(cl, ndl_l));
-                    int c = mf & ml;
-                    if (c) { f = (void *)(p + i + __builtin_ctz(c)); break; }
+            __m256i ndl_f = _mm256_set1_epi8((char)first);
+            __m256i ndl_l = _mm256_set1_epi8((char)last);
+            size_t i = 0;
+            while (i + 32 <= len - nlen + 1) {
+                __m256i cf = _mm256_loadu_si256((const __m256i *)(data + i));
+                int mf = _mm256_movemask_epi8(_mm256_cmpeq_epi8(cf, ndl_f));
+                __m256i cl = _mm256_loadu_si256((const __m256i *)(data + i + nlen - 1));
+                int ml_mask = _mm256_movemask_epi8(_mm256_cmpeq_epi8(cl, ndl_l));
+                int combined = mf & ml_mask;
+                while (combined) {
+                    int bit = __builtin_ctz(combined);
+                    size_t pos = i + (size_t)bit;
+                    if (memcmp(data + pos + 1, needle + 1, nlen - 2) == 0) count++;
+                    combined &= combined - 1;
                 }
-                if (!f) for (; i < rem; i++) if (p[i] == first && p[i + nlen - 1] == last) { f = (void *)(p + i); break; }
-                if (!f) break;
-                pos = (size_t)((const char *)f - data);
-                if (memcmp(data + pos + 1, needle + 1, nlen - 2) == 0) count++;
-                pos++;
+                i += 32;
+            }
+            for (; i + nlen <= len; i++) {
+                if (data[i] == first && data[i + nlen - 1] == last &&
+                    memcmp(data + i + 1, needle + 1, nlen - 2) == 0) count++;
             }
         }
     } else {
+        /* Output path: AVX2 SIMD scan with line extraction */
         const bool use_color = opts->color && isatty(fileno(out));
         const bool show_lineno = opts->line_number;
         const size_t plen = path ? strlen(path) : 0;
@@ -171,136 +152,94 @@ fgrep_status_t search_data(const char *data, size_t len, const char *path,
 
         if (nlen == 1) {
             unsigned char c = (unsigned char)needle[0];
-            __m128i ndl = _mm_set1_epi8((char)c);
-            while (pos + 1 <= len) {
-                size_t rem = len - pos;
-                const unsigned char *p = data + pos;
-                size_t i = 0;
-                void *f = NULL;
-                for (; i + 16 <= rem; i += 16) {
-                    __m128i chunk = _mm_loadu_si128((const __m128i *)(p + i));
-                    int mask = _mm_movemask_epi8(_mm_cmpeq_epi8(chunk, ndl));
-                    if (mask) { f = (void *)(p + i + __builtin_ctz(mask)); break; }
-                }
-                if (!f) for (; i < rem; i++) if (p[i] == c) { f = (void *)(p + i); break; }
-                if (!f) break;
-                pos = (size_t)((const char *)f - data);
-
-                count++;
-                if (max_count > 0 && count > max_count) break;
-                size_t ls = find_line_start(data, pos);
-                size_t le = find_line_end(data, len, pos + nlen);
-                if (show_lineno) line_no = count_lines_to(data, ls);
-
-                size_t needed = plen + (show_lineno ? 24 : 0) + (le - ls) + 2;
-                if (outpos + needed > OUTPUT_BUF_SIZE) { fwrite(outbuf, 1, outpos, out); outpos = 0; }
-
-                if (path) {
-                    if (use_color) {
-                        memcpy(outbuf + outpos, "\033[1;35m", 7); outpos += 7;
-                        memcpy(outbuf + outpos, path, plen); outpos += plen;
-                        memcpy(outbuf + outpos, "\033[0;36m:", 8); outpos += 8;
-                    } else {
-                        memcpy(outbuf + outpos, path, plen); outpos += plen;
-                        outbuf[outpos++] = ':';
-                    }
-                }
-                if (show_lineno) {
-                    char lbuf[24];
-                    int n = snprintf(lbuf, sizeof(lbuf), "%zu:", line_no);
-                    if (use_color) {
-                        memcpy(outbuf + outpos, "\033[1;32m", 7); outpos += 7;
-                        memcpy(outbuf + outpos, lbuf, (size_t)n); outpos += (size_t)n;
-                        memcpy(outbuf + outpos, "\033[0;36m", 7); outpos += 7;
-                    } else {
-                        memcpy(outbuf + outpos, lbuf, (size_t)n); outpos += (size_t)n;
-                    }
-                }
-
-                size_t match_off = (size_t)(pos - ls);
-                if (use_color) {
-                    if (match_off > 0) { memcpy(outbuf + outpos, data + ls, match_off); outpos += match_off; }
-                    memcpy(outbuf + outpos, "\033[1;31m", 7); outpos += 7;
-                    outbuf[outpos++] = data[pos];
-                    memcpy(outbuf + outpos, "\033[0m", 4); outpos += 4;
-                    size_t after = (size_t)(le - pos - 1);
-                    if (after > 0) { memcpy(outbuf + outpos, data + pos + 1, after); outpos += after; }
-                } else {
+            __m256i ndl = _mm256_set1_epi8((char)c);
+            size_t i = 0;
+            while (i + 32 <= len) {
+                __m256i chunk = _mm256_loadu_si256((const __m256i *)(data + i));
+                int mask = _mm256_movemask_epi8(_mm256_cmpeq_epi8(chunk, ndl));
+                while (mask) {
+                    int bit = __builtin_ctz(mask);
+                    size_t mpos = i + (size_t)bit;
+                    count++;
+                    if (max_count > 0 && count > max_count) goto done_output;
+                    size_t ls = find_line_start(data, mpos);
+                    size_t le = find_line_end(data, len, mpos + 1);
+                    if (show_lineno) line_no = count_lines_to(data, ls);
+                    size_t needed = plen + (show_lineno ? 24 : 0) + (le - ls) + 2;
+                    if (outpos + needed > OUTPUT_BUF_SIZE) { fwrite(outbuf, 1, outpos, out); outpos = 0; }
+                    if (path) { memcpy(outbuf + outpos, path, plen); outpos += plen; outbuf[outpos++] = ':'; }
+                    if (show_lineno) { int n = snprintf(outbuf + outpos, 24, "%zu:", line_no); outpos += (size_t)n; }
                     memcpy(outbuf + outpos, data + ls, (size_t)(le - ls)); outpos += (size_t)(le - ls);
+                    outbuf[outpos++] = '\n';
+                    mask &= mask - 1;
                 }
-                outbuf[outpos++] = '\n';
-                pos++;
+                i += 32;
+            }
+            for (; i < len; i++) {
+                if (data[i] == c) {
+                    count++;
+                    if (max_count > 0 && count > max_count) break;
+                    size_t ls = find_line_start(data, i);
+                    size_t le = find_line_end(data, len, i + 1);
+                    if (show_lineno) line_no = count_lines_to(data, ls);
+                    size_t needed = plen + (show_lineno ? 24 : 0) + (le - ls) + 2;
+                    if (outpos + needed > OUTPUT_BUF_SIZE) { fwrite(outbuf, 1, outpos, out); outpos = 0; }
+                    if (path) { memcpy(outbuf + outpos, path, plen); outpos += plen; outbuf[outpos++] = ':'; }
+                    if (show_lineno) { int n = snprintf(outbuf + outpos, 24, "%zu:", line_no); outpos += (size_t)n; }
+                    memcpy(outbuf + outpos, data + ls, (size_t)(le - ls)); outpos += (size_t)(le - ls);
+                    outbuf[outpos++] = '\n';
+                }
             }
         } else {
             unsigned char first = (unsigned char)needle[0];
             unsigned char last = (unsigned char)needle[nlen - 1];
-            __m128i ndl_f = _mm_set1_epi8((char)first);
-            __m128i ndl_l = _mm_set1_epi8((char)last);
-            while (pos + nlen <= len) {
-                size_t rem = len - pos - nlen + 1;
-                const unsigned char *p = data + pos;
-                size_t i = 0;
-                void *f = NULL;
-                for (; i + 16 <= rem; i += 16) {
-                    __m128i cf = _mm_loadu_si128((const __m128i *)(p + i));
-                    int mf = _mm_movemask_epi8(_mm_cmpeq_epi8(cf, ndl_f));
-                    __m128i cl = _mm_loadu_si128((const __m128i *)(p + i + nlen - 1));
-                    int ml = _mm_movemask_epi8(_mm_cmpeq_epi8(cl, ndl_l));
-                    int c = mf & ml;
-                    if (c) { f = (void *)(p + i + __builtin_ctz(c)); break; }
-                }
-                if (!f) for (; i < rem; i++) if (p[i] == first && p[i + nlen - 1] == last) { f = (void *)(p + i); break; }
-                if (!f) break;
-                pos = (size_t)((const char *)f - data);
-                if (memcmp(data + pos + 1, needle + 1, nlen - 2) != 0) { pos++; continue; }
-
-                count++;
-                if (max_count > 0 && count > max_count) break;
-                size_t ls = find_line_start(data, pos);
-                size_t le = find_line_end(data, len, pos + nlen);
-                if (show_lineno) line_no = count_lines_to(data, ls);
-
-                size_t needed = plen + (show_lineno ? 24 : 0) + (le - ls) + 2;
-                if (outpos + needed > OUTPUT_BUF_SIZE) { fwrite(outbuf, 1, outpos, out); outpos = 0; }
-
-                if (path) {
-                    if (use_color) {
-                        memcpy(outbuf + outpos, "\033[1;35m", 7); outpos += 7;
-                        memcpy(outbuf + outpos, path, plen); outpos += plen;
-                        memcpy(outbuf + outpos, "\033[0;36m:", 8); outpos += 8;
-                    } else {
-                        memcpy(outbuf + outpos, path, plen); outpos += plen;
-                        outbuf[outpos++] = ':';
+            __m256i ndl_f = _mm256_set1_epi8((char)first);
+            __m256i ndl_l = _mm256_set1_epi8((char)last);
+            size_t i = 0;
+            while (i + 32 <= len - nlen + 1) {
+                __m256i cf = _mm256_loadu_si256((const __m256i *)(data + i));
+                int mf = _mm256_movemask_epi8(_mm256_cmpeq_epi8(cf, ndl_f));
+                __m256i cl = _mm256_loadu_si256((const __m256i *)(data + i + nlen - 1));
+                int ml_mask = _mm256_movemask_epi8(_mm256_cmpeq_epi8(cl, ndl_l));
+                int combined = mf & ml_mask;
+                while (combined) {
+                    int bit = __builtin_ctz(combined);
+                    size_t mpos = i + (size_t)bit;
+                    if (memcmp(data + mpos + 1, needle + 1, nlen - 2) == 0) {
+                        count++;
+                        if (max_count > 0 && count > max_count) goto done_output;
+                        size_t ls = find_line_start(data, mpos);
+                        size_t le = find_line_end(data, len, mpos + nlen);
+                        if (show_lineno) line_no = count_lines_to(data, ls);
+                        size_t needed = plen + (show_lineno ? 24 : 0) + (le - ls) + 2;
+                        if (outpos + needed > OUTPUT_BUF_SIZE) { fwrite(outbuf, 1, outpos, out); outpos = 0; }
+                        if (path) { memcpy(outbuf + outpos, path, plen); outpos += plen; outbuf[outpos++] = ':'; }
+                        if (show_lineno) { int n = snprintf(outbuf + outpos, 24, "%zu:", line_no); outpos += (size_t)n; }
+                        memcpy(outbuf + outpos, data + ls, (size_t)(le - ls)); outpos += (size_t)(le - ls);
+                        outbuf[outpos++] = '\n';
                     }
+                    combined &= combined - 1;
                 }
-                if (show_lineno) {
-                    char lbuf[24];
-                    int n = snprintf(lbuf, sizeof(lbuf), "%zu:", line_no);
-                    if (use_color) {
-                        memcpy(outbuf + outpos, "\033[1;32m", 7); outpos += 7;
-                        memcpy(outbuf + outpos, lbuf, (size_t)n); outpos += (size_t)n;
-                        memcpy(outbuf + outpos, "\033[0;36m", 7); outpos += 7;
-                    } else {
-                        memcpy(outbuf + outpos, lbuf, (size_t)n); outpos += (size_t)n;
-                    }
-                }
-
-                size_t match_off = (size_t)(pos - ls);
-                if (use_color) {
-                    if (match_off > 0) { memcpy(outbuf + outpos, data + ls, match_off); outpos += match_off; }
-                    memcpy(outbuf + outpos, "\033[1;31m", 7); outpos += 7;
-                    memcpy(outbuf + outpos, data + pos, nlen); outpos += nlen;
-                    memcpy(outbuf + outpos, "\033[0m", 4); outpos += 4;
-                    size_t after = (size_t)(le - pos - nlen);
-                    if (after > 0) { memcpy(outbuf + outpos, data + pos + nlen, after); outpos += after; }
-                } else {
+                i += 32;
+            }
+            for (; i + nlen <= len; i++) {
+                if (data[i] == first && data[i + nlen - 1] == last &&
+                    memcmp(data + i + 1, needle + 1, nlen - 2) == 0) {
+                    count++;
+                    if (max_count > 0 && count > max_count) break;
+                    size_t ls = find_line_start(data, i);
+                    size_t le = find_line_end(data, len, i + nlen);
+                    if (show_lineno) line_no = count_lines_to(data, ls);
+                    size_t needed = plen + (show_lineno ? 24 : 0) + (le - ls) + 2;
+                    if (outpos + needed > OUTPUT_BUF_SIZE) { fwrite(outbuf, 1, outpos, out); outpos = 0; }
+                    if (path) { memcpy(outbuf + outpos, path, plen); outpos += plen; outbuf[outpos++] = ':'; }
+                    if (show_lineno) { int n = snprintf(outbuf + outpos, 24, "%zu:", line_no); outpos += (size_t)n; }
                     memcpy(outbuf + outpos, data + ls, (size_t)(le - ls)); outpos += (size_t)(le - ls);
+                    outbuf[outpos++] = '\n';
                 }
-                outbuf[outpos++] = '\n';
-                pos += nlen;
             }
         }
-
+done_output:
         if (outpos > 0) fwrite(outbuf, 1, outpos, out);
     }
 
