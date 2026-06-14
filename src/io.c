@@ -43,11 +43,17 @@ fgrep_status_t fgrep_io_open_stdin(fgrep_io_t *io) {
         char *newbuf = realloc(buf, cap);
         if (!newbuf) { free(buf); return FGREP_ERR_NOMEM; }
         buf = newbuf;
+
         ssize_t n = read(STDIN_FILENO, buf + total, cap - total);
         if (n <= 0) break;
         total += (size_t)n;
-        if (total == cap) { cap *= 2; if (cap > (1 << 20)) break; }
+
+        if (total == cap) {
+            cap *= 2;
+            if (cap > (1 << 20)) break;
+        }
     }
+
     io->data = buf;
     io->size = total;
     io->mode = FGREP_IO_READ;

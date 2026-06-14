@@ -26,6 +26,7 @@ add_executable(fgrep
     src/threadpool.c
     src/output.c
     src/search.c
+    src/bmh_simd.c
 )
 
 target_include_directories(fgrep PRIVATE
@@ -49,6 +50,10 @@ add_executable(test_regex tests/test_regex.c src/regex_engine.c src/simd.c src/c
 target_include_directories(test_regex PRIVATE ${CMAKE_SOURCE_DIR}/include ${CMAKE_SOURCE_DIR}/src)
 target_link_libraries(test_regex PRIVATE Threads::Threads)
 add_test(NAME test_regex COMMAND test_regex)
+
+add_executable(test_bmh tests/test_bmh.c src/bmh_simd.c)
+target_include_directories(test_bmh PRIVATE ${CMAKE_SOURCE_DIR}/include ${CMAKE_SOURCE_DIR}/src)
+add_test(NAME test_bmh COMMAND test_bmh)
 
 add_executable(test_integration tests/test_integration.c
     src/simd.c src/cpu.c src/io.c src/fileutil.c
