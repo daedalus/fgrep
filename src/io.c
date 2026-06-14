@@ -4,9 +4,14 @@
 #include <sys/stat.h>
 #include <unistd.h>
 #include <stdlib.h>
-#include <errno.h>
+#include <string.h>
 
-static fgrep_status_t io_open_mmap(fgrep_io_t *io, const char *path) {
+#define IO_BUF_SIZE (1 << 16)
+
+fgrep_status_t fgrep_io_open(fgrep_io_t *io, const char *path) {
+    __builtin_memset(io, 0, sizeof(*io));
+    io->fd = -1;
+
     int fd = open(path, O_RDONLY);
     if (fd < 0) return FGREP_ERR_IO;
 
@@ -18,7 +23,6 @@ static fgrep_status_t io_open_mmap(fgrep_io_t *io, const char *path) {
 
     void *map = mmap(NULL, size, PROT_READ, MAP_PRIVATE, fd, 0);
     if (map == MAP_FAILED) { close(fd); return FGREP_ERR_IO; }
-
     madvise(map, size, MADV_SEQUENTIAL);
 
     io->data = map;
@@ -29,68 +33,21 @@ static fgrep_status_t io_open_mmap(fgrep_io_t *io, const char *path) {
     return FGREP_OK;
 }
 
-static fgrep_status_t io_open_read(fgrep_io_t *io, const char *path) {
-    int fd = open(path, O_RDONLY);
-    if (fd < 0) return FGREP_ERR_IO;
-
-    struct stat st;
-    if (fstat(fd, &st) < 0) { close(fd); return FGREP_ERR_IO; }
-
-    size_t cap = (size_t)st.st_size > 0 ? (size_t)st.st_size : FGREP_IO_BUF_SIZE;
-    char *buf = malloc(cap);
-    if (!buf) { close(fd); return FGREP_ERR_NOMEM; }
-
-    size_t total = 0;
-    ssize_t n;
-    while (total < cap && (n = read(fd, buf + total, cap - total)) > 0) {
-        total += (size_t)n;
-    }
-
-    io->data = buf;
-    io->size = total;
-    io->mode = FGREP_IO_READ;
-    io->fd = fd;
-    io->u.read.buf = buf;
-    io->u.read.cap = cap;
-    return FGREP_OK;
-}
-
-fgrep_status_t fgrep_io_open(fgrep_io_t *io, const char *path) {
-    __builtin_memset(io, 0, sizeof(*io));
-    io->fd = -1;
-
-    struct stat st;
-    if (stat(path, &st) < 0) return FGREP_ERR_IO;
-
-    if (S_ISREG(st.st_mode) && (size_t)st.st_size >= FGREP_MMAP_THRESHOLD) {
-        return io_open_mmap(io, path);
-    }
-    return io_open_read(io, path);
-}
-
 fgrep_status_t fgrep_io_open_stdin(fgrep_io_t *io) {
     __builtin_memset(io, 0, sizeof(*io));
     io->fd = -1;
-
-    size_t cap = FGREP_IO_BUF_SIZE;
+    size_t cap = IO_BUF_SIZE;
     size_t total = 0;
     char *buf = NULL;
-
     for (;;) {
         char *newbuf = realloc(buf, cap);
         if (!newbuf) { free(buf); return FGREP_ERR_NOMEM; }
         buf = newbuf;
-
         ssize_t n = read(STDIN_FILENO, buf + total, cap - total);
         if (n <= 0) break;
         total += (size_t)n;
-
-        if (total == cap) {
-            cap *= 2;
-            if (cap > FGREP_MAX_LINE_LEN) break;
-        }
+        if (total == cap) { cap *= 2; if (cap > (1 << 20)) break; }
     }
-
     io->data = buf;
     io->size = total;
     io->mode = FGREP_IO_READ;
