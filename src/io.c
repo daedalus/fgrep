@@ -6,8 +6,6 @@
 #include <stdlib.h>
 #include <string.h>
 
-#define IO_BUF_SIZE (1 << 16)
-
 fgrep_status_t fgrep_io_open(fgrep_io_t *io, const char *path) {
     __builtin_memset(io, 0, sizeof(*io));
     io->fd = -1;
@@ -36,24 +34,21 @@ fgrep_status_t fgrep_io_open(fgrep_io_t *io, const char *path) {
 fgrep_status_t fgrep_io_open_stdin(fgrep_io_t *io) {
     __builtin_memset(io, 0, sizeof(*io));
     io->fd = -1;
-    size_t cap = IO_BUF_SIZE;
+    size_t cap = 1 << 16;
     size_t total = 0;
     char *buf = NULL;
     for (;;) {
         char *newbuf = realloc(buf, cap);
         if (!newbuf) { free(buf); return FGREP_ERR_NOMEM; }
         buf = newbuf;
-
         ssize_t n = read(STDIN_FILENO, buf + total, cap - total);
         if (n <= 0) break;
         total += (size_t)n;
-
         if (total == cap) {
             cap *= 2;
             if (cap > (1 << 20)) break;
         }
     }
-
     io->data = buf;
     io->size = total;
     io->mode = FGREP_IO_READ;
