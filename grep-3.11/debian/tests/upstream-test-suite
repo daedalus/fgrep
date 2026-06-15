@@ -1,0 +1,10 @@
+#!/bin/sh
+set -e
+
+export DEB_BUILD_PROFILES="nocheck nodoc" DEB_BUILD_OPTIONS="nocheck nodoc"
+
+dpkg-source --before-build `pwd`
+dpkg-buildpackage -rfakeroot --target=clean
+dpkg-buildpackage -rfakeroot --target=build
+
+make -C tests check-am

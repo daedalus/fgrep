@@ -1,0 +1,63 @@
+grep (3.8-3) unstable; urgency=low
+
+  To temporarily workaround some issues with the debian building and ci
+  infrastructure, this Debian grep release temporarily disables the stray
+  backlash warning. Upstream behaviour can be enabled back again by setting
+  the DEB_GREP_ENABLE_STRAY_BACKSLASH_WARN envvar.
+
+  Since regular expressions with stray backslashes could lead to unexpected
+  results, the patch applied in this release will be reverted in the future.
+
+ -- Santiago Ruano Rincón <santiago@debian.org>  Tue, 25 Oct 2022 17:55:14 +0200
+
+grep (3.8-2) unstable; urgency=low
+
+  This Debian grep release removes the deprecation warning about egrep and
+  fgrep. These alternative programs will be still shipped by Debian. Although,
+  for portability reasons, users are encouraged to use grep with the concerned
+  options instead of those alternative programs.
+
+ -- Santiago Ruano Rincón <santiago@debian.org>  Mon, 12 Sep 2022 15:47:11 +0200
+
+grep (3.8-1) unstable; urgency=low
+
+  From upstream's NEWS:
+
+  The egrep and fgrep commands, which have been deprecated since
+  release 2.5.3 (2007), now warn that they are obsolescent and should
+  be replaced by grep -E and grep -F.
+
+  To follow upstream's behaviour, the Debian-specific rgrep command is
+  obsolescent. For the moment, it is just no longer documeted.
+
+  More upstream NEWS:
+
+  The confusing GREP_COLOR environment variable is now obsolescent.
+  Instead of GREP_COLOR='xxx', use GREP_COLORS='mt=xxx'.  grep now
+  warns if GREP_COLOR is used and is not overridden by GREP_COLORS.
+  Also, grep now treats GREP_COLOR like GREP_COLORS by silently
+  ignoring it if it attempts to inject ANSI terminal escapes.
+
+  Regular expressions with stray backslashes now cause warnings, as
+  their unspecified behavior can lead to unexpected results.
+  For example, '\a' and 'a' are not always equivalent
+  <https://bugs.gnu.org/39678>.  Similarly, regular expressions or
+  subexpressions that start with a repetition operator now also cause
+  warnings due to their unspecified behavior; for example, *a(+b|{1}c)
+  now has three reasons to warn.  The warnings are intended as a
+  transition aid; they are likely to be errors in future releases.
+
+  Regular expressions like [:space:] are now errors even if
+  POSIXLY_CORRECT is set, since POSIX now allows the GNU behavior.
+
+ -- Santiago Ruano Rincón <santiago@debian.org>  Tue, 06 Sep 2022 15:29:49 +0200
+
+grep (3.6-1) unstable; urgency=low
+
+  From upstream's NEWS:
+
+  The GREP_OPTIONS environment variable no longer affects grep's behavior.
+  The variable was declared obsolescent in grep 2.21 (2014), and since
+  then any use had caused grep to issue a diagnostic.
+
+ -- Santiago Ruano Rincón <santiago@debian.org>  Mon, 09 Nov 2020 10:57:22 +0100
