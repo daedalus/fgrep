@@ -85,7 +85,7 @@ fgrep_status_t search_data(const char *data, size_t len, const char *path,
 
     const char *needle = pat->fixed_str;
     size_t nlen = pat->fixed_len;
-    if (nlen == 0) { if (match_count_out) *match_count_out = 0; return FGREP_OK; }
+    if (nlen == 0 || nlen > len) { if (match_count_out) *match_count_out = 0; return FGREP_OK; }
 
     FILE *out = ctx->output;
     pthread_mutex_t *mtx = ctx->output_mutex;
