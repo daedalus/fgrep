@@ -166,7 +166,7 @@ fgrep_status_t search_data(const char *data, size_t len, const char *path,
             unsigned char last = (unsigned char)needle[nlen - 1];
             __m256i ndl_f = _mm256_set1_epi8((char)first);
             __m256i ndl_l = _mm256_set1_epi8((char)last);
-            while (pos + 32 <= len) {
+            while (pos + nlen - 1 + 32 <= len) {
                 __m256i cf = _mm256_loadu_si256((const __m256i *)(data + pos));
                 int mf = _mm256_movemask_epi8(_mm256_cmpeq_epi8(cf, ndl_f));
                 __m256i cl = _mm256_loadu_si256((const __m256i *)(data + pos + nlen - 1));
