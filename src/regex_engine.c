@@ -44,6 +44,7 @@ static bool fixed_string_insensitive_match(const char *data, size_t len, const f
         void *found = memchr_fn(data + i, (int)needle_char, len - i);
         if (!found) return false;
         i = (size_t)((const char *)found - data);
+        if (i + pat->fixed_len > len) return false;
 
         bool match = true;
         for (size_t j = 1; j < pat->fixed_len; j++) {
